@@ -5,11 +5,15 @@
  */
 
 #include <boost/thread.hpp>
+#include <cmath>
+#include <cstdint>
 
 #include <rclcpp/rclcpp.hpp>
 
 #include <abb_libegm/egm_common.h>
+#include <abb_libegm/egm_common_auxiliary.h>
 #include <abb_libegm/egm_controller_interface.h>
+
 
 #include <abb_libegm/egm_wrapper.pb.h>
 
@@ -53,6 +57,46 @@ static bool buildOneJointMoveOutput(
   return true;
 }
 
+// Цель: опустить Z до 800 мм в глобальной системе. X, Y и ориентация — из feedback.
+static bool buildCartesianMoveOutput(abb::egm::wrapper::Output* p_output,
+                                     const abb::egm::wrapper::Input& inputs
+)
+{
+  abb::egm::wrapper::Robot* robot = p_output->mutable_robot();
+  abb::egm::wrapper::CartesianSpace* cartesian = robot->mutable_cartesian();
+  abb::egm::wrapper::CartesianPose* pose = cartesian->mutable_pose();
+
+  const auto& feedback_pose = inputs.feedback().robot().cartesian().pose();
+  if (std::abs(feedback_pose.position().z() - 1000.0) > 0.01) {
+    pose->mutable_position()->set_x(770.0);
+    pose->mutable_position()->set_y(0.0);
+    pose->mutable_position()->set_z(1000.0);
+  } else {
+    return false;
+  }
+  
+  // pose->mutable_position()->set_x(770.0);
+  // pose->mutable_position()->set_y(-14.56);
+  // pose->mutable_position()->set_z(1000.0);
+
+  pose->mutable_euler()->set_x(180.0);
+  pose->mutable_euler()->set_y(0.0);
+  pose->mutable_euler()->set_z(-90.0);
+
+  // pose->mutable_quaternion()->set_u0(1.0);
+  // pose->mutable_quaternion()->set_u1(0.0);
+  // pose->mutable_quaternion()->set_u2(0.0);
+  // pose->mutable_quaternion()->set_u3(0.0);
+
+  // if (feedback_pose.has_euler()) {
+  //   pose->mutable_euler()->CopyFrom(feedback_pose.euler());
+  // } else if (feedback_pose.has_quaternion()) {
+  //   pose->mutable_quaternion()->CopyFrom(feedback_pose.quaternion());
+  // }
+
+  return true;
+}
+
 }  // namespace egm
 }  // namespace abb
 
@@ -90,7 +134,7 @@ int main(int argc, char** argv)
   abb::egm::wrapper::Input inputs;
   double degrees = 0.0;
   const unsigned int timeout_ms = 1000;  // Max wait for one EGM message from robot.
-
+  
   while (rclcpp::ok())
   {
     // Blocks until one EGM packet from robot or timeout. If timeout, we just retry
@@ -103,8 +147,9 @@ int main(int argc, char** argv)
     interface.read(&inputs);
 
     abb::egm::wrapper::Output outputs;
-    bool running = abb::egm::buildOneJointMoveOutput(&outputs, &degrees);
-
+    // bool running = abb::egm::buildOneJointMoveOutput(&outputs, &degrees);
+    bool running = abb::egm::buildCartesianMoveOutput(&outputs, inputs);
+    
     if (!running)
     {
       RCLCPP_INFO(node->get_logger(), "EGM task finished!");
