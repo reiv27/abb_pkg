@@ -7,6 +7,7 @@
 #include <boost/thread.hpp>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -29,9 +30,8 @@ namespace egm
  * \param degrees current angle [deg]; incremented by 0.1 each call.
  * \return true if trajectory continues, false when degrees >= 90 (task finished).
  */
-static bool buildOneJointMoveOutput(
-  abb::egm::wrapper::Output* p_output,
-  double* p_degrees)
+static bool buildOneJointMoveOutput(abb::egm::wrapper::Output* p_output,
+                                    double* p_degrees)
 {
   if (*p_degrees >= 90.0)
   {
@@ -57,10 +57,8 @@ static bool buildOneJointMoveOutput(
   return true;
 }
 
-// Цель: опустить Z до 800 мм в глобальной системе. X, Y и ориентация — из feedback.
 static bool buildCartesianMoveOutput(abb::egm::wrapper::Output* p_output,
-                                     const abb::egm::wrapper::Input& inputs
-)
+                                     const abb::egm::wrapper::Input& inputs)
 {
   abb::egm::wrapper::Robot* robot = p_output->mutable_robot();
   abb::egm::wrapper::CartesianSpace* cartesian = robot->mutable_cartesian();
@@ -74,10 +72,6 @@ static bool buildCartesianMoveOutput(abb::egm::wrapper::Output* p_output,
   } else {
     return false;
   }
-  
-  // pose->mutable_position()->set_x(770.0);
-  // pose->mutable_position()->set_y(-14.56);
-  // pose->mutable_position()->set_z(1000.0);
 
   pose->mutable_euler()->set_x(180.0);
   pose->mutable_euler()->set_y(0.0);
@@ -100,6 +94,53 @@ static bool buildCartesianMoveOutput(abb::egm::wrapper::Output* p_output,
 }  // namespace egm
 }  // namespace abb
 
+bool moveToPoint(double x, double y, double z, double rx, double ry, double rz,
+                 abb::egm::wrapper::Output* p_output,
+                 const abb::egm::wrapper::Input& inputs,
+                 double tolerance_length = 0.01,
+                 double tolerance_angle = 0.01)
+{
+  abb::egm::wrapper::Robot* robot = p_output->mutable_robot();
+  abb::egm::wrapper::CartesianSpace* cartesian = robot->mutable_cartesian();
+  abb::egm::wrapper::CartesianPose* pose = cartesian->mutable_pose();
+
+  if (std::abs(x - inputs.feedback().robot().cartesian().pose().position().x()) > tolerance_length ||
+      std::abs(y - inputs.feedback().robot().cartesian().pose().position().y()) > tolerance_length ||
+      std::abs(z - inputs.feedback().robot().cartesian().pose().position().z()) > tolerance_length ||
+      std::abs(rx - inputs.feedback().robot().cartesian().pose().euler().x()) > tolerance_angle ||
+      std::abs(ry - inputs.feedback().robot().cartesian().pose().euler().y()) > tolerance_angle ||
+      std::abs(rz - inputs.feedback().robot().cartesian().pose().euler().z()) > tolerance_angle) {
+    pose->mutable_position()->set_x(x);
+    pose->mutable_position()->set_y(y);
+    pose->mutable_position()->set_z(z);
+    pose->mutable_euler()->set_x(rx);
+    pose->mutable_euler()->set_y(ry);
+    pose->mutable_euler()->set_z(rz);
+    return false;
+  }
+
+  return true;
+}
+
+std::vector<double> trajectoryGenerator(
+  double x0, double y0, double z0,
+  double rx0, double ry0, double rz0,
+  double R, double* theta, double dtheta)
+{
+  std::vector<double> result;
+  result.reserve(6);
+
+  *theta += dtheta;
+  result.push_back(x0 + R * std::cos(*theta));
+  result.push_back(y0 + R * std::sin(*theta));
+  result.push_back(z0);
+  result.push_back(rx0);
+  result.push_back(ry0);
+  result.push_back(rz0);
+
+  return result;
+}
+
 int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
@@ -113,7 +154,7 @@ int main(int argc, char** argv)
   abb::egm::BaseConfiguration config;
   config.axes = abb::egm::Six;
   config.use_demo_outputs = false;   // We send real joint targets, not demo data.
-  config.use_velocity_outputs = false;  // Position-only; no velocity in Output.
+  config.use_velocity_outputs = true;  // Position-only; no velocity in Output.
 
   boost::asio::io_service io_service;
   abb::egm::EGMControllerInterface interface(io_service, port_number, config);
@@ -132,8 +173,21 @@ int main(int argc, char** argv)
   boost::thread server_thread(boost::bind(&boost::asio::io_service::run, &io_service));
 
   abb::egm::wrapper::Input inputs;
-  double degrees = 0.0;
   const unsigned int timeout_ms = 1000;  // Max wait for one EGM message from robot.
+
+  double x0 = 770.0;
+  double y0 = 0.0;
+  double z0 = 1000.0;
+  double rx0 = 180.0;
+  double ry0 = 0.0;
+  double rz0 = -90.0;
+
+  double R = 200.0;
+  double theta = 0.0;
+  double dtheta = 0.1;
+  // bool task_finished = false;
+
+  std::vector<double> target_point ={x0+R*std::cos(theta), y0+R*std::sin(theta), z0, rx0, ry0, rz0};
   
   while (rclcpp::ok())
   {
@@ -145,12 +199,26 @@ int main(int argc, char** argv)
     }
 
     interface.read(&inputs);
-
-    abb::egm::wrapper::Output outputs;
-    // bool running = abb::egm::buildOneJointMoveOutput(&outputs, &degrees);
-    bool running = abb::egm::buildCartesianMoveOutput(&outputs, inputs);
+    // double x = inputs.feedback().robot().cartesian().pose().position().x();
+    // double y = inputs.feedback().robot().cartesian().pose().position().y();
+    // double z = inputs.feedback().robot().cartesian().pose().position().z();
+    // double rx = inputs.feedback().robot().cartesian().pose().euler().x();
+    // double ry = inputs.feedback().robot().cartesian().pose().euler().y();
+    // double rz = inputs.feedback().robot().cartesian().pose().euler().z();
     
-    if (!running)
+    abb::egm::wrapper::Output outputs;
+
+    // bool running = abb::egm::buildOneJointMoveOutput(&outputs, &degrees);
+    // bool running = abb::egm::buildCartesianMoveOutput(&outputs, inputs);
+
+    bool running = moveToPoint(target_point[0], target_point[1], target_point[2], target_point[3], target_point[4], target_point[5], &outputs, inputs);
+    if (running) {
+      target_point = trajectoryGenerator(x0, y0, z0, rx0, ry0, rz0, R, &theta, dtheta);
+      RCLCPP_INFO(node->get_logger(), "New target point");
+      RCLCPP_INFO(node->get_logger(), "Theta: %f", theta);
+    }
+
+    if (theta >= 2 * M_PI)
     {
       RCLCPP_INFO(node->get_logger(), "EGM task finished!");
       break;
