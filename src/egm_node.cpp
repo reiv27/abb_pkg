@@ -92,8 +92,6 @@ double sign(double x) {
 bool moveToPoint(double x, double y, double z, double rx, double ry, double rz,
                  abb::egm::wrapper::Output* p_output,
                  const abb::egm::wrapper::Input& inputs,
-                 double dlin,
-                 double dang,
                  double tolerance_length = 1.0,
                  double tolerance_angle = 0.5)
 {
@@ -126,77 +124,13 @@ bool moveToPoint(double x, double y, double z, double rx, double ry, double rz,
   return true;
 }
 
-/*
- * -----------------------------------------------------------------------------
- * Алгоритм дискретизированного движения к целевой точке (set = следующая цель)
- * -----------------------------------------------------------------------------
- *
- * Роботу нельзя подавать сразу целевую точку (x,y,z,rx,ry,rz) — он не успевает.
- * Нужно разбивать путь на маленькие шаги и в каждом цикле EGM отправлять
- * следующую промежуточную цель (set).
- *
- * Шаги алгоритма в каждом цикле (например в while после interface.read):
- *
- * 1. Целевая точка (финальная) задана: target = (x, y, z, rx, ry, rz).
- *
- * 2. Текущая поза робота берётся из feedback: current = (cx, cy, cz, crx, cry, crz).
- *
- * 3. Направление к цели:
- *    - по позиции:  dx = x - cx,  dy = y - cy,  dz = z - cz;
- *    - по углам:    drx = rx - crx, dry = ry - cry, drz = rz - crz.
- *
- * 4. Ограничение шага (дискретизация):
- *    - линейный шаг не больше dlin [мм]:
- *      dist_lin = sqrt(dx^2 + dy^2 + dz^2);
- *      если dist_lin > dlin, то (dx, dy, dz) масштабируем: *= dlin / dist_lin;
- *    - угловой шаг не больше dang [град]:
- *      dist_ang = sqrt(drx^2 + dry^2 + drz^2);
- *      если dist_ang > dang, то (drx, dry, drz) *= dang / dist_ang;
- *
- * 5. Следующая целевая точка (то, что подаём в set):
- *    next = current + (dx, dy, dz, drx, dry, drz)  // уже ограниченные шаги
- *    В output записываем: set_x(next_x), set_y(next_y), ... — именно следующую
- *    целевую точку, а не приращение.
- *
- * 6. Отправляем output роботу (interface.write). В следующем цикле current
- *    обновится по feedback, и мы снова вычислим next к той же цели target.
- *
- * 7. Критерий «достигли цели»: |x - cx| <= tol_lin и аналогично для y, z
- *    и для углов (tol_ang). Тогда можно переходить к следующей целевой точке
- *    (например из траектории) или завершать движение.
- *
- * Параметры:
- *   dlin   — макс. линейный шаг за один цикл [мм]; меньше = плавнее и медленнее.
- *   dang   — макс. угловой шаг за один цикл [град].
- *   tol_lin, tol_ang — допуски для признания «достигнуто».
- *
- * Реализация: функция stepTowardPoint() ниже выполняет шаги 2–6 и возвращает
- * true, когда цель достигнута (шаг 7).
- * -----------------------------------------------------------------------------
- */
-
-/**
- * \brief Discretized move toward target pose: computes direction and limited
- *        step, then writes the next target point (current + step) into output,
- *        not the step vector itself.
- * \param x, y, z Final target position [mm].
- * \param rx, ry, rz Target orientation (Euler) [deg]; sent as-is every cycle (TCP
- *        orientation is not changed during move).
- * \param p_output EGM output to fill with next target point (pose).
- * \param inputs Current EGM feedback (robot state).
- * \param dlin Max linear step per call [mm].
- * \param dang Unused; kept for API compatibility.
- * \param tolerance_length Position tolerance to consider "reached" [mm].
- * \param tolerance_angle Unused; kept for API compatibility.
- * \return true when position reached within tolerance_length, false otherwise.
- */
 bool stepTowardPoint(double x, double y, double z, double rx, double ry, double rz,
                      abb::egm::wrapper::Output* p_output,
                      const abb::egm::wrapper::Input& inputs,
                      double dlin,
                      double dang,
-                     double tolerance_length = 0.1,
-                     double tolerance_angle = 0.1)
+                     double tolerance_length = 50.0,
+                     double tolerance_angle = 0.5)
 {
   const auto& feedback = inputs.feedback().robot().cartesian().pose();
   double cx = feedback.position().x();
@@ -233,21 +167,19 @@ bool stepTowardPoint(double x, double y, double z, double rx, double ry, double 
   return reached_lin;
 }
 
-std::vector<double> trajectoryGenerator(
+std::vector<std::vector<double>> trajectoryGenerator(
   double x0, double y0, double z0,
   double rx0, double ry0, double rz0,
-  double R, double* theta, double dtheta)
+  double R, double dtheta)
 {
-  std::vector<double> result;
-  result.reserve(6);
+  const int n = std::round(2 * M_PI / dtheta);
+  std::vector<std::vector<double>> result;
 
-  *theta += dtheta;
-  result.push_back(x0 + R * std::cos(*theta));
-  result.push_back(y0 + R * std::sin(*theta));
-  result.push_back(z0);
-  result.push_back(rx0);
-  result.push_back(ry0);
-  result.push_back(rz0);
+  for (int i = 0; i < n; ++i) {
+    const double theta = i * dtheta;
+    std::vector<double> point{x0 + R * std::cos(theta), y0 + R * std::sin(theta), z0, rx0, ry0, rz0};
+    result.push_back(point);
+  }
 
   return result;
 }
@@ -293,54 +225,60 @@ int main(int argc, char** argv)
   double ry0 = 0.0;
   double rz0 = 90.0;
 
-  double R = 200.0;
+  double R = 300.0;
   double theta = 0.0;
-  double dtheta = 0.05;
-
-  double dlin = 15.0;
+  double dtheta = 0.005;
+  double dlin = 50.0;
   double dang = 0.5;
+
+  std::vector<std::vector<double>> trajectory = trajectoryGenerator(x0, y0, z0, rx0, ry0, rz0, R, dtheta);
+
   std::vector<double> d_vector{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   // bool task_finished = false;
 
   std::vector<double> target_point{x0+R*std::cos(theta), y0+R*std::sin(theta), z0, rx0, ry0, rz0};
   
+  std::vector<double> waypoint_1{x0, y0 + 400.0, z0};
+  std::vector<double> waypoint_2{x0, y0 - 400.0, z0};
+  std::vector<double> waypoint_3{x0, y0, z0 + 200.0};
+
+  std::vector<std::vector<double>> waypoints{waypoint_1, waypoint_2, waypoint_3};
+  int waypoint_index = 0;
+
   while (rclcpp::ok())
   {
-    // Blocks until one EGM packet from robot or timeout. If timeout, we just retry
-    // (no log); first run may delay up to timeout_ms until robot starts sending.
     if (!interface.waitForMessage(timeout_ms))
     {
       continue;
     }
 
     interface.read(&inputs);
-    // double x = inputs.feedback().robot().cartesian().pose().position().x();
-    // double y = inputs.feedback().robot().cartesian().pose().position().y();
-    // double z = inputs.feedback().robot().cartesian().pose().position().z();
-    // double rx = inputs.feedback().robot().cartesian().pose().euler().x();
-    // double ry = inputs.feedback().robot().cartesian().pose().euler().y();
-    // double rz = inputs.feedback().robot().cartesian().pose().euler().z();
     
     abb::egm::wrapper::Output outputs;
-
-    // bool running = abb::egm::buildOneJointMoveOutput(&outputs, &degrees);
-    // bool running = abb::egm::buildCartesianMoveOutput(&outputs, inputs, &z);
-
-    // bool running = moveToPoint(target_point[0], target_point[1], target_point[2], target_point[3], target_point[4], target_point[5], &outputs, inputs);
+    
     bool running = stepTowardPoint(target_point[0], target_point[1], target_point[2], target_point[3], target_point[4], target_point[5], &outputs, inputs, dlin, dang);
     if (running) {
-      target_point = trajectoryGenerator(x0, y0, z0, rx0, ry0, rz0, R, &theta, dtheta);
-        // RCLCPP_INFO(node->get_logger(), "Theta: %f", theta);
-      // RCLCPP_INFO(node->get_logger(), "New target point");
-      // RCLCPP_INFO(node->get_logger(), "Theta: %f", theta);
+      // target_point = trajectoryGenerator(waypoints[waypoint_index][0], waypoints[waypoint_index][1], waypoints[waypoint_index][2], rx0, ry0, rz0, R, &theta, dtheta);
+      // waypoint_index++;
+      // if (waypoint_index > waypoints.size()) {
+      //   RCLCPP_INFO(node->get_logger(), "EGM task finished!");
+      //   break;
+      // }
+
+      target_point = trajectory[waypoint_index];
+      ++waypoint_index;
+      if (waypoint_index > trajectory.size()) {
+        RCLCPP_INFO(node->get_logger(), "EGM task finished!");
+        break;
+      }
     }
 
-    if (theta >= 2 * M_PI)
-    // if (!running)
-    {
-      RCLCPP_INFO(node->get_logger(), "EGM task finished!");
-      break;
-    }
+    // if (theta >= 2 * M_PI)
+    // // if (!running)
+    // {
+    //   RCLCPP_INFO(node->get_logger(), "EGM task finished!");
+    //   break;
+    // }
 
     // Send target positions back to robot; EGM protocol expects reply after each input.
     interface.write(outputs);
