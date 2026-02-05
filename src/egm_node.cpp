@@ -58,17 +58,19 @@ static bool buildOneJointMoveOutput(abb::egm::wrapper::Output* p_output,
 }
 
 static bool buildCartesianMoveOutput(abb::egm::wrapper::Output* p_output,
-                                     const abb::egm::wrapper::Input& inputs)
+                                     const abb::egm::wrapper::Input& inputs,
+                                     double* z)
 {
   abb::egm::wrapper::Robot* robot = p_output->mutable_robot();
   abb::egm::wrapper::CartesianSpace* cartesian = robot->mutable_cartesian();
   abb::egm::wrapper::CartesianPose* pose = cartesian->mutable_pose();
 
   const auto& feedback_pose = inputs.feedback().robot().cartesian().pose();
-  if (std::abs(feedback_pose.position().z() - 1000.0) > 0.01) {
-    pose->mutable_position()->set_x(770.0);
-    pose->mutable_position()->set_y(0.0);
-    pose->mutable_position()->set_z(1000.0);
+  if (feedback_pose.position().z() > 1000.0) {
+    *z += 1.0;
+    pose->mutable_position()->set_x(776.0);
+    pose->mutable_position()->set_y(-16.0);
+    pose->mutable_position()->set_z(1120.07 - *z);
   } else {
     return false;
   }
@@ -77,39 +79,41 @@ static bool buildCartesianMoveOutput(abb::egm::wrapper::Output* p_output,
   pose->mutable_euler()->set_y(0.0);
   pose->mutable_euler()->set_z(-90.0);
 
-  // pose->mutable_quaternion()->set_u0(1.0);
-  // pose->mutable_quaternion()->set_u1(0.0);
-  // pose->mutable_quaternion()->set_u2(0.0);
-  // pose->mutable_quaternion()->set_u3(0.0);
-
-  // if (feedback_pose.has_euler()) {
-  //   pose->mutable_euler()->CopyFrom(feedback_pose.euler());
-  // } else if (feedback_pose.has_quaternion()) {
-  //   pose->mutable_quaternion()->CopyFrom(feedback_pose.quaternion());
-  // }
-
   return true;
 }
 
 }  // namespace egm
 }  // namespace abb
 
+double sign(double x) {
+  return x / std::abs(x);
+}
+
 bool moveToPoint(double x, double y, double z, double rx, double ry, double rz,
                  abb::egm::wrapper::Output* p_output,
                  const abb::egm::wrapper::Input& inputs,
-                 double tolerance_length = 0.01,
-                 double tolerance_angle = 0.01)
+                 double dlin,
+                 double dang,
+                 double tolerance_length = 1.0,
+                 double tolerance_angle = 0.5)
 {
   abb::egm::wrapper::Robot* robot = p_output->mutable_robot();
   abb::egm::wrapper::CartesianSpace* cartesian = robot->mutable_cartesian();
   abb::egm::wrapper::CartesianPose* pose = cartesian->mutable_pose();
 
-  if (std::abs(x - inputs.feedback().robot().cartesian().pose().position().x()) > tolerance_length ||
-      std::abs(y - inputs.feedback().robot().cartesian().pose().position().y()) > tolerance_length ||
-      std::abs(z - inputs.feedback().robot().cartesian().pose().position().z()) > tolerance_length ||
-      std::abs(rx - inputs.feedback().robot().cartesian().pose().euler().x()) > tolerance_angle ||
-      std::abs(ry - inputs.feedback().robot().cartesian().pose().euler().y()) > tolerance_angle ||
-      std::abs(rz - inputs.feedback().robot().cartesian().pose().euler().z()) > tolerance_angle) {
+  double dx = x - inputs.feedback().robot().cartesian().pose().position().x();
+  double dy = y - inputs.feedback().robot().cartesian().pose().position().y();
+  double dz = z - inputs.feedback().robot().cartesian().pose().position().z();
+  double drx = rx - inputs.feedback().robot().cartesian().pose().euler().x();
+  double dry = ry - inputs.feedback().robot().cartesian().pose().euler().y();
+  double drz = rz - inputs.feedback().robot().cartesian().pose().euler().z();
+
+  if (std::abs(dx) > tolerance_length ||
+      std::abs(dy) > tolerance_length ||
+      std::abs(dz) > tolerance_length ||
+      std::abs(drx) > tolerance_angle ||
+      std::abs(dry) > tolerance_angle ||
+      std::abs(drz) > tolerance_angle) {
     pose->mutable_position()->set_x(x);
     pose->mutable_position()->set_y(y);
     pose->mutable_position()->set_z(z);
@@ -120,6 +124,113 @@ bool moveToPoint(double x, double y, double z, double rx, double ry, double rz,
   }
 
   return true;
+}
+
+/*
+ * -----------------------------------------------------------------------------
+ * Алгоритм дискретизированного движения к целевой точке (set = следующая цель)
+ * -----------------------------------------------------------------------------
+ *
+ * Роботу нельзя подавать сразу целевую точку (x,y,z,rx,ry,rz) — он не успевает.
+ * Нужно разбивать путь на маленькие шаги и в каждом цикле EGM отправлять
+ * следующую промежуточную цель (set).
+ *
+ * Шаги алгоритма в каждом цикле (например в while после interface.read):
+ *
+ * 1. Целевая точка (финальная) задана: target = (x, y, z, rx, ry, rz).
+ *
+ * 2. Текущая поза робота берётся из feedback: current = (cx, cy, cz, crx, cry, crz).
+ *
+ * 3. Направление к цели:
+ *    - по позиции:  dx = x - cx,  dy = y - cy,  dz = z - cz;
+ *    - по углам:    drx = rx - crx, dry = ry - cry, drz = rz - crz.
+ *
+ * 4. Ограничение шага (дискретизация):
+ *    - линейный шаг не больше dlin [мм]:
+ *      dist_lin = sqrt(dx^2 + dy^2 + dz^2);
+ *      если dist_lin > dlin, то (dx, dy, dz) масштабируем: *= dlin / dist_lin;
+ *    - угловой шаг не больше dang [град]:
+ *      dist_ang = sqrt(drx^2 + dry^2 + drz^2);
+ *      если dist_ang > dang, то (drx, dry, drz) *= dang / dist_ang;
+ *
+ * 5. Следующая целевая точка (то, что подаём в set):
+ *    next = current + (dx, dy, dz, drx, dry, drz)  // уже ограниченные шаги
+ *    В output записываем: set_x(next_x), set_y(next_y), ... — именно следующую
+ *    целевую точку, а не приращение.
+ *
+ * 6. Отправляем output роботу (interface.write). В следующем цикле current
+ *    обновится по feedback, и мы снова вычислим next к той же цели target.
+ *
+ * 7. Критерий «достигли цели»: |x - cx| <= tol_lin и аналогично для y, z
+ *    и для углов (tol_ang). Тогда можно переходить к следующей целевой точке
+ *    (например из траектории) или завершать движение.
+ *
+ * Параметры:
+ *   dlin   — макс. линейный шаг за один цикл [мм]; меньше = плавнее и медленнее.
+ *   dang   — макс. угловой шаг за один цикл [град].
+ *   tol_lin, tol_ang — допуски для признания «достигнуто».
+ *
+ * Реализация: функция stepTowardPoint() ниже выполняет шаги 2–6 и возвращает
+ * true, когда цель достигнута (шаг 7).
+ * -----------------------------------------------------------------------------
+ */
+
+/**
+ * \brief Discretized move toward target pose: computes direction and limited
+ *        step, then writes the next target point (current + step) into output,
+ *        not the step vector itself.
+ * \param x, y, z Final target position [mm].
+ * \param rx, ry, rz Target orientation (Euler) [deg]; sent as-is every cycle (TCP
+ *        orientation is not changed during move).
+ * \param p_output EGM output to fill with next target point (pose).
+ * \param inputs Current EGM feedback (robot state).
+ * \param dlin Max linear step per call [mm].
+ * \param dang Unused; kept for API compatibility.
+ * \param tolerance_length Position tolerance to consider "reached" [mm].
+ * \param tolerance_angle Unused; kept for API compatibility.
+ * \return true when position reached within tolerance_length, false otherwise.
+ */
+bool stepTowardPoint(double x, double y, double z, double rx, double ry, double rz,
+                     abb::egm::wrapper::Output* p_output,
+                     const abb::egm::wrapper::Input& inputs,
+                     double dlin,
+                     double dang,
+                     double tolerance_length = 0.1,
+                     double tolerance_angle = 0.1)
+{
+  const auto& feedback = inputs.feedback().robot().cartesian().pose();
+  double cx = feedback.position().x();
+  double cy = feedback.position().y();
+  double cz = feedback.position().z();
+
+  double dx = x - cx;
+  double dy = y - cy;
+  double dz = z - cz;
+
+  double dist_lin = std::sqrt(dx * dx + dy * dy + dz * dz);
+  double scale_lin = 1.0;
+  if (dist_lin > dlin && dist_lin > 1e-9)
+  {
+    scale_lin = dlin / dist_lin;
+  }
+  double next_target_x = cx + dx * scale_lin;
+  double next_target_y = cy + dy * scale_lin;
+  double next_target_z = cz + dz * scale_lin;
+
+  abb::egm::wrapper::Robot* robot = p_output->mutable_robot();
+  abb::egm::wrapper::CartesianSpace* cartesian = robot->mutable_cartesian();
+  abb::egm::wrapper::CartesianPose* pose = cartesian->mutable_pose();
+  pose->mutable_position()->set_x(next_target_x);
+  pose->mutable_position()->set_y(next_target_y);
+  pose->mutable_position()->set_z(next_target_z);
+  pose->mutable_euler()->set_x(rx);
+  pose->mutable_euler()->set_y(ry);
+  pose->mutable_euler()->set_z(rz);
+
+  bool reached_lin = (std::abs(dx) <= tolerance_length &&
+                      std::abs(dy) <= tolerance_length &&
+                      std::abs(dz) <= tolerance_length);
+  return reached_lin;
 }
 
 std::vector<double> trajectoryGenerator(
@@ -148,7 +259,7 @@ int main(int argc, char** argv)
   auto node = rclcpp::Node::make_shared("egm_node");
 
   // Port must match the EGM port configured on the robot controller (default 6510).
-  const int port = node->declare_parameter<int>("port", 6510);
+  const int port = node->declare_parameter<int>("port", 6515);
   const unsigned short port_number = static_cast<unsigned short>(port);
 
   abb::egm::BaseConfiguration config;
@@ -180,14 +291,18 @@ int main(int argc, char** argv)
   double z0 = 1000.0;
   double rx0 = 180.0;
   double ry0 = 0.0;
-  double rz0 = -90.0;
+  double rz0 = 90.0;
 
   double R = 200.0;
   double theta = 0.0;
-  double dtheta = 0.1;
+  double dtheta = 0.05;
+
+  double dlin = 15.0;
+  double dang = 0.5;
+  std::vector<double> d_vector{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   // bool task_finished = false;
 
-  std::vector<double> target_point ={x0+R*std::cos(theta), y0+R*std::sin(theta), z0, rx0, ry0, rz0};
+  std::vector<double> target_point{x0+R*std::cos(theta), y0+R*std::sin(theta), z0, rx0, ry0, rz0};
   
   while (rclcpp::ok())
   {
@@ -209,16 +324,19 @@ int main(int argc, char** argv)
     abb::egm::wrapper::Output outputs;
 
     // bool running = abb::egm::buildOneJointMoveOutput(&outputs, &degrees);
-    // bool running = abb::egm::buildCartesianMoveOutput(&outputs, inputs);
+    // bool running = abb::egm::buildCartesianMoveOutput(&outputs, inputs, &z);
 
-    bool running = moveToPoint(target_point[0], target_point[1], target_point[2], target_point[3], target_point[4], target_point[5], &outputs, inputs);
+    // bool running = moveToPoint(target_point[0], target_point[1], target_point[2], target_point[3], target_point[4], target_point[5], &outputs, inputs);
+    bool running = stepTowardPoint(target_point[0], target_point[1], target_point[2], target_point[3], target_point[4], target_point[5], &outputs, inputs, dlin, dang);
     if (running) {
       target_point = trajectoryGenerator(x0, y0, z0, rx0, ry0, rz0, R, &theta, dtheta);
-      RCLCPP_INFO(node->get_logger(), "New target point");
-      RCLCPP_INFO(node->get_logger(), "Theta: %f", theta);
+        // RCLCPP_INFO(node->get_logger(), "Theta: %f", theta);
+      // RCLCPP_INFO(node->get_logger(), "New target point");
+      // RCLCPP_INFO(node->get_logger(), "Theta: %f", theta);
     }
 
     if (theta >= 2 * M_PI)
+    // if (!running)
     {
       RCLCPP_INFO(node->get_logger(), "EGM task finished!");
       break;
