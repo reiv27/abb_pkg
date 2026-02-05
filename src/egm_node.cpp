@@ -7,6 +7,8 @@
 #include <boost/thread.hpp>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <string>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -30,8 +32,9 @@ namespace egm
  * \param degrees current angle [deg]; incremented by 0.1 each call.
  * \return true if trajectory continues, false when degrees >= 90 (task finished).
  */
-static bool buildOneJointMoveOutput(abb::egm::wrapper::Output* p_output,
-                                    double* p_degrees)
+[[maybe_unused]] static bool buildOneJointMoveOutput(
+    abb::egm::wrapper::Output* p_output,
+    double* p_degrees)
 {
   if (*p_degrees >= 90.0)
   {
@@ -57,9 +60,10 @@ static bool buildOneJointMoveOutput(abb::egm::wrapper::Output* p_output,
   return true;
 }
 
-static bool buildCartesianMoveOutput(abb::egm::wrapper::Output* p_output,
-                                     const abb::egm::wrapper::Input& inputs,
-                                     double* z)
+[[maybe_unused]] static bool buildCartesianMoveOutput(
+    abb::egm::wrapper::Output* p_output,
+    const abb::egm::wrapper::Input& inputs,
+    double* z)
 {
   abb::egm::wrapper::Robot* robot = p_output->mutable_robot();
   abb::egm::wrapper::CartesianSpace* cartesian = robot->mutable_cartesian();
@@ -132,6 +136,8 @@ bool stepTowardPoint(double x, double y, double z, double rx, double ry, double 
                      double tolerance_length = 50.0,
                      double tolerance_angle = 0.5)
 {
+  (void)dang;
+  (void)tolerance_angle;
   const auto& feedback = inputs.feedback().robot().cartesian().pose();
   double cx = feedback.position().x();
   double cy = feedback.position().y();
@@ -182,6 +188,30 @@ std::vector<std::vector<double>> trajectoryGenerator(
   }
 
   return result;
+}
+
+/**
+ * \brief Appends one line to CSV: target x,y,z and feedback x,y,z (только позиция из позы).
+ *        On first write creates file and writes header for easy Python read.
+ * \param path Path to .csv file (e.g. "egm_points.csv").
+ * \param target_x, target_y, target_z Target point coordinates [mm].
+ * \param feedback_x, feedback_y, feedback_z Feedback pose position [mm].
+ */
+void appendTargetAndFeedbackToCsv(const std::string& path,
+                                 double target_x, double target_y, double target_z,
+                                 double feedback_x, double feedback_y, double feedback_z)
+{
+  std::ofstream f(path, std::ios::app);
+  if (!f.is_open())
+  {
+    return;
+  }
+  if (f.tellp() == 0)
+  {
+    f << "target_x,target_y,target_z,feedback_x,feedback_y,feedback_z\n";
+  }
+  f << target_x << "," << target_y << "," << target_z << ","
+    << feedback_x << "," << feedback_y << "," << feedback_z << "\n";
 }
 
 int main(int argc, char** argv)
@@ -243,7 +273,7 @@ int main(int argc, char** argv)
   std::vector<double> waypoint_3{x0, y0, z0 + 200.0};
 
   std::vector<std::vector<double>> waypoints{waypoint_1, waypoint_2, waypoint_3};
-  int waypoint_index = 0;
+  size_t waypoint_index = 0U;
 
   while (rclcpp::ok())
   {
@@ -253,33 +283,25 @@ int main(int argc, char** argv)
     }
 
     interface.read(&inputs);
-    
     abb::egm::wrapper::Output outputs;
     
     bool running = stepTowardPoint(target_point[0], target_point[1], target_point[2], target_point[3], target_point[4], target_point[5], &outputs, inputs, dlin, dang);
+    
     if (running) {
-      // target_point = trajectoryGenerator(waypoints[waypoint_index][0], waypoints[waypoint_index][1], waypoints[waypoint_index][2], rx0, ry0, rz0, R, &theta, dtheta);
-      // waypoint_index++;
-      // if (waypoint_index > waypoints.size()) {
-      //   RCLCPP_INFO(node->get_logger(), "EGM task finished!");
-      //   break;
-      // }
-
+      const auto& pose = inputs.feedback().robot().cartesian().pose();
+      double fx = pose.position().x();
+      double fy = pose.position().y();
+      double fz = pose.position().z();
+      appendTargetAndFeedbackToCsv("egm_points.csv",
+                                  target_point[0], target_point[1], target_point[2],
+                                  fx, fy, fz);
       target_point = trajectory[waypoint_index];
       ++waypoint_index;
-      if (waypoint_index > trajectory.size()) {
+      if (waypoint_index >= trajectory.size()) {
         RCLCPP_INFO(node->get_logger(), "EGM task finished!");
         break;
       }
     }
-
-    // if (theta >= 2 * M_PI)
-    // // if (!running)
-    // {
-    //   RCLCPP_INFO(node->get_logger(), "EGM task finished!");
-    //   break;
-    // }
-
     // Send target positions back to robot; EGM protocol expects reply after each input.
     interface.write(outputs);
   }
